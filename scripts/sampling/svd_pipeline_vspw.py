@@ -23,11 +23,24 @@ from scripts.util.detection.nsfw_and_watermark_dectection import \
     DeepFloydDataFiltering
 from scripts.sampling.feature_extraction import feature_extraction_main
 from scripts.sampling.process_output import get_seg_map_main
+from scripts.sampling.dataset_specs import (
+    build_dataset_spec,
+    list_sequences,
+    resolve_gt_mask_path,
+)
 
 from tqdm import tqdm
 import argparse
 
 import time
+
+
+def _frame_sort_key(filename):
+    stem = os.path.splitext(filename)[0]
+    try:
+        return (0, int(stem))
+    except ValueError:
+        return (1, stem)
 
 
 def sample(
@@ -57,6 +70,9 @@ def sample(
     inversion_type: str = "add_noise",
     is_refine_mask: bool = False,
     is_aggre_attn: bool = False,
+    mask_dir: Optional[str] = None,
+    mask_suffix: str = "",
+    mask_ext: str = ".png",
 ):
 
     
@@ -206,7 +222,7 @@ def sample(
 
     batch_size = 14
     video_frames_path = [f for f in os.listdir(input_video_path) if f.endswith(".png") or f.endswith(".jpg")]
-    video_frames_path = sorted(video_frames_path, key=lambda x: int(x.split(".")[0]))
+    video_frames_path = sorted(video_frames_path, key=_frame_sort_key)
     video_frames_path = [os.path.join(input_video_path, f) for f in video_frames_path]
     
     frame_img_list = []
@@ -357,9 +373,11 @@ def sample(
                 feature_types = "spatial_self_attn_q"
                 feature_height = H // (F * 2)
                 feature_width = W // (F * 2)
-                input_mask_path = input_video_path.replace("origin", "mask")
+                input_mask_path = mask_dir if mask_dir else input_video_path.replace("origin", "mask")
                 if batch_id == 0:
-                    gt_mask_path = os.path.join(input_mask_path, f"{frame_name_list[0]}.png")
+                    gt_mask_path = resolve_gt_mask_path(
+                        input_mask_path, frame_name_list[0], mask_suffix, mask_ext
+                    )
                 else:
                     gt_mask_path = None
                 unique_labels, ref_mask, ref_feature_map = feature_extraction_main(mode, num_clusters, t_start, block_name, experiment_name, fit_experiments, feature_types, 
@@ -588,6 +606,13 @@ if __name__ == "__main__":
     
     parser.add_argument("--dataset_path", type=str, default="../dataset/vspw/VSPW_480p/data", help="path to the input dataset")
     parser.add_argument("--split_file_path", type=str, default="../dataset/vspw/VSPW_480p/val.txt", help="path to the split file")
+    parser.add_argument("--dataset", type=str, default="vspw", choices=["vspw", "apollo"], help="dataset name")
+    parser.add_argument("--dataset_root", type=str, default="/home/wangcl/data/open_video_DGSS/ApolloScape", help="dataset root path")
+    parser.add_argument("--color_root", type=str, default=None, help="override color image root")
+    parser.add_argument("--mask_root", type=str, default=None, help="override gt mask root")
+    parser.add_argument("--mask_suffix", type=str, default="", help="mask filename suffix")
+    parser.add_argument("--mask_ext", type=str, default=".png", help="mask file extension")
+    parser.add_argument("--output_root", type=str, default=None, help="override output root")
     parser.add_argument("--num_steps", type=int, default=25, help="number of steps")
     parser.add_argument("--num_frames", type=int, default=14, help="number of frames")
     parser.add_argument("--device", type=str, default="cuda", help="device")
@@ -635,19 +660,25 @@ if __name__ == "__main__":
     print(f"Is latent blending: {is_latent_blending}")
     print(f"Is multi attn: {args.is_aggre_attn}")
     
-    dataset_path = args.dataset_path
-    exp_name_list = os.listdir(dataset_path)
-    exp_name_list = list(np.loadtxt(args.split_file_path, dtype=str))
-    exp_name_list.sort(key=lambda x: int(x.split(".")[0].split("_")[0]))
-    
-    if args.exp_start_idx + args.num_exp > len(exp_name_list):
-        args.num_exp = len(exp_name_list) - args.exp_start_idx
-    exp_name_list = exp_name_list[args.exp_start_idx:args.exp_start_idx + args.num_exp]
-    
-    print("We start from exp:", exp_name_list[0])
+    spec = build_dataset_spec(args)
+    sequences = list_sequences(spec)
+    if not sequences:
+        raise ValueError(f"No sequences found under {spec.color_root}")
 
-    for exp_name in tqdm(exp_name_list, desc="num_videos"):
-        input_video_path = os.path.join(dataset_path, exp_name, "origin")
+    if args.output_root:
+        feature_folder = args.output_root
+    elif args.dataset == "apollo":
+        feature_folder = "/data1/wangcl/project/VidSeg/apollo"
+    else:
+        feature_folder = args.feature_folder
+
+    if args.exp_start_idx + args.num_exp > len(sequences):
+        args.num_exp = len(sequences) - args.exp_start_idx
+    sequences = sequences[args.exp_start_idx:args.exp_start_idx + args.num_exp]
+    
+    print("We start from exp:", sequences[0][0])
+
+    for exp_name, input_video_path, mask_dir in tqdm(sequences, desc="num_videos"):
         try:
             sample(
                 input_video_path=input_video_path,
@@ -667,10 +698,13 @@ if __name__ == "__main__":
                 is_injected_features=args.is_injected_features,
                 num_masks=args.num_masks,
                 is_latent_blending=is_latent_blending,
-                feature_folder=args.feature_folder,
+                feature_folder=feature_folder,
                 inversion_type=args.inversion_type,
                 is_refine_mask=args.is_refine_mask,
-                is_aggre_attn=args.is_aggre_attn)
+                is_aggre_attn=args.is_aggre_attn,
+                mask_dir=mask_dir,
+                mask_suffix=spec.mask_suffix,
+                mask_ext=spec.mask_ext)
         except Exception as e:
             print(f"Failed to sample video {exp_name}: {e}")
             continue

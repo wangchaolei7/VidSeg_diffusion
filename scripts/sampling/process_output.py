@@ -72,9 +72,10 @@ def generate_difference_map(exp_name, basecount, modulate_lambda, num_masks, num
             
 # compute the final segmentation maps
 def get_seg_map_main(exp_name, basecount, modulate_lambda, num_masks, num_frames, filter_difference, filter_s=0.7,
-                     resize_height=28, resize_width=52, unique_labels=None, 
+                     resize_height=28, resize_width=52, unique_labels=None,
                      base_folder=None, mask_folder=None, frame_name_list=None, feature_timestep="24",
-                     is_smooth=False, batch_id=None, color_map_path=None, color_map_mapping="order"):
+                     is_smooth=False, batch_id=None, color_map_path=None, color_map_mapping="order",
+                     output_size=None):
     
     generate_difference_map(exp_name, basecount, modulate_lambda, num_masks, num_frames, unique_labels=unique_labels,
                             base_folder=base_folder, frame_name_list=frame_name_list, )
@@ -158,11 +159,14 @@ def get_seg_map_main(exp_name, basecount, modulate_lambda, num_masks, num_frames
         # map the seg_map based on the mask_iterator
         seg_map_raw = mask_iterator[seg_map]
         seg_map_raw = Image.fromarray(seg_map_raw.astype(np.uint8))
-        seg_map_raw.save(os.path.join(segmentation_map_folder_raw, f"{frame_name}.png"))
         if color_map_mapping == "order":
             seg_map_color = color_map[seg_map]
         else:
             seg_map_color = color_map[seg_map_raw]
         seg_map_color = Image.fromarray(seg_map_color.astype(np.uint8))
+        if output_size is not None:
+            seg_map_raw = seg_map_raw.resize(output_size, Image.NEAREST)
+            seg_map_color = seg_map_color.resize(output_size, Image.NEAREST)
+        seg_map_raw.save(os.path.join(segmentation_map_folder_raw, f"{frame_name}.png"))
         seg_map_color.save(os.path.join(segmentation_map_folder, f"{frame_name}.jpg"))
         
