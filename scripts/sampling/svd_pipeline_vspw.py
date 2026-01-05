@@ -1,5 +1,6 @@
 import math
 import os
+import multiprocessing as mp
 from glob import glob
 from pathlib import Path
 from typing import Optional
@@ -599,85 +600,36 @@ def seed_everything(seed):
     torch.backends.cudnn.deterministic = True 
 
 
-if __name__ == "__main__":
-    # Fire(sample)
-    # change it to argparser
-    parser = argparse.ArgumentParser()
-    
-    parser.add_argument("--dataset_path", type=str, default="../dataset/vspw/VSPW_480p/data", help="path to the input dataset")
-    parser.add_argument("--split_file_path", type=str, default="../dataset/vspw/VSPW_480p/val.txt", help="path to the split file")
-    parser.add_argument("--dataset", type=str, default="vspw", choices=["vspw", "apollo"], help="dataset name")
-    parser.add_argument("--dataset_root", type=str, default="/home/wangcl/data/open_video_DGSS/ApolloScape", help="dataset root path")
-    parser.add_argument("--color_root", type=str, default=None, help="override color image root")
-    parser.add_argument("--mask_root", type=str, default=None, help="override gt mask root")
-    parser.add_argument("--mask_suffix", type=str, default="", help="mask filename suffix")
-    parser.add_argument("--mask_ext", type=str, default=".png", help="mask file extension")
-    parser.add_argument("--output_root", type=str, default=None, help="override output root")
-    parser.add_argument("--num_steps", type=int, default=25, help="number of steps")
-    parser.add_argument("--num_frames", type=int, default=14, help="number of frames")
-    parser.add_argument("--device", type=str, default="cuda", help="device")
-    parser.add_argument("--seed", type=int, default=1, help="seed for sampling")
-    parser.add_argument("--motion_bucket_id", type=int, default=127, help="motion bucket id")
-    parser.add_argument("--cond_aug", type=float, default=0.02, help="condition augmentation")
-    parser.add_argument("--modulate_block_idx", type=str, default="8", help="selected block idx")
-    parser.add_argument("--modulate_timestep", type=str, default="17", help="selected modulate timestep")
-    parser.add_argument("--feature_timestep", type=str, default="24", help="selected feature extraction timestep")
-    parser.add_argument("--modulate_schedule", type=str, default="constant", help="modulate lambda schedule")
-    parser.add_argument("--modulate_lambda_start", type=float, default=50.0, help="modulate lambda start")
-    parser.add_argument("--modulate_lambda_end", type=float, default=50.0, help="modulate lambda end")
-    parser.add_argument("--num_masks", type=int, default=20, help="number of masks to use")
-    parser.add_argument("--is_injected_features", default=False, action="store_true", help="whether to use injected features")
-    parser.add_argument("--modulate_layer_type", type=str, default="spatial,temporal", help="modulate layer type")
-    parser.add_argument("--modulate_attn_type", type=str, default="self_attn", help="modulate attention type")
-    parser.add_argument("--modulate_timestep_frames_schedule", type=str, default="constant", help="modulate timestep frames schedule")
-    parser.add_argument("--feature_folder", type=str, default="features_outputs_svd_VSPW", help="feature folder path")
-    parser.add_argument("--exp_start_idx", type=int, default=0, help="experiment start index")
-    parser.add_argument("--num_exp", type=int, default=100, help="number of experiments to run")
-    parser.add_argument("--disable_latent_blending", default=False, action="store_true", help="whether to disable latent blending")
-    parser.add_argument("--inversion_type", type=str, default="add_noise", help="inversion type")
-    parser.add_argument("--is_refine_mask", default=False, action="store_true", help="whether to correct the mask")
-    parser.add_argument("--is_aggre_attn", default=False, action="store_true", help="whether to use multiple attention maps for kmeans mask extraction")
-    
-    args = parser.parse_args()
-    
+def _parse_gpu_ids(gpus):
+    if not gpus:
+        return []
+    return [int(x) for x in gpus.split(",") if x.strip()]
+
+
+def run_sequences(sequences, device, args, spec, feature_folder):
+    if not sequences:
+        return
+    global model, exp_name
     num_frames = default(args.num_frames, 14)
     num_steps = default(args.num_steps, 25)
     model_config = "configs/inference/svd.yaml"
-    device = args.device
-    
+
     model, filter = load_model(
-            model_config,
-            device,
-            num_frames,
-            num_steps,
-        )
+        model_config,
+        device,
+        num_frames,
+        num_steps,
+    )
     model.en_and_decode_n_samples_a_time = 1
-    
+
     if args.disable_latent_blending:
         is_latent_blending = False
     else:
         is_latent_blending = True
     print(f"Is latent blending: {is_latent_blending}")
     print(f"Is multi attn: {args.is_aggre_attn}")
-    
-    spec = build_dataset_spec(args)
-    sequences = list_sequences(spec)
-    if not sequences:
-        raise ValueError(f"No sequences found under {spec.color_root}")
 
-    if args.output_root:
-        feature_folder = args.output_root
-    elif args.dataset == "apollo":
-        feature_folder = "/data1/wangcl/project/VidSeg/apollo"
-    else:
-        feature_folder = args.feature_folder
-
-    if args.exp_start_idx + args.num_exp > len(sequences):
-        args.num_exp = len(sequences) - args.exp_start_idx
-    sequences = sequences[args.exp_start_idx:args.exp_start_idx + args.num_exp]
-    
     print("We start from exp:", sequences[0][0])
-
     for exp_name, input_video_path, mask_dir in tqdm(sequences, desc="num_videos"):
         try:
             sample(
@@ -708,3 +660,96 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"Failed to sample video {exp_name}: {e}")
             continue
+
+
+def _run_worker(sequences, gpu_id, args, spec, feature_folder):
+    device = args.device
+    if gpu_id is not None:
+        torch.cuda.set_device(gpu_id)
+        device = f"cuda:{gpu_id}"
+    run_sequences(sequences, device, args, spec, feature_folder)
+
+
+if __name__ == "__main__":
+    # Fire(sample)
+    # change it to argparser
+    parser = argparse.ArgumentParser()
+    
+    parser.add_argument("--dataset_path", type=str, default="../dataset/vspw/VSPW_480p/data", help="path to the input dataset")
+    parser.add_argument("--split_file_path", type=str, default="../dataset/vspw/VSPW_480p/val.txt", help="path to the split file")
+    parser.add_argument("--dataset", type=str, default="vspw", choices=["vspw", "apollo"], help="dataset name")
+    parser.add_argument("--dataset_root", type=str, default="/home/wangcl/data/open_video_DGSS/ApolloScape", help="dataset root path")
+    parser.add_argument("--color_root", type=str, default=None, help="override color image root")
+    parser.add_argument("--mask_root", type=str, default=None, help="override gt mask root")
+    parser.add_argument("--mask_suffix", type=str, default="", help="mask filename suffix")
+    parser.add_argument("--mask_ext", type=str, default=".png", help="mask file extension")
+    parser.add_argument("--output_root", type=str, default=None, help="override output root")
+    parser.add_argument("--num_steps", type=int, default=25, help="number of steps")
+    parser.add_argument("--num_frames", type=int, default=14, help="number of frames")
+    parser.add_argument("--gpus", type=str, default="", help="comma-separated gpu ids")
+    parser.add_argument("--device", type=str, default="cuda", help="device")
+    parser.add_argument("--seed", type=int, default=1, help="seed for sampling")
+    parser.add_argument("--motion_bucket_id", type=int, default=127, help="motion bucket id")
+    parser.add_argument("--cond_aug", type=float, default=0.02, help="condition augmentation")
+    parser.add_argument("--modulate_block_idx", type=str, default="8", help="selected block idx")
+    parser.add_argument("--modulate_timestep", type=str, default="17", help="selected modulate timestep")
+    parser.add_argument("--feature_timestep", type=str, default="24", help="selected feature extraction timestep")
+    parser.add_argument("--modulate_schedule", type=str, default="constant", help="modulate lambda schedule")
+    parser.add_argument("--modulate_lambda_start", type=float, default=50.0, help="modulate lambda start")
+    parser.add_argument("--modulate_lambda_end", type=float, default=50.0, help="modulate lambda end")
+    parser.add_argument("--num_masks", type=int, default=20, help="number of masks to use")
+    parser.add_argument("--is_injected_features", default=False, action="store_true", help="whether to use injected features")
+    parser.add_argument("--modulate_layer_type", type=str, default="spatial,temporal", help="modulate layer type")
+    parser.add_argument("--modulate_attn_type", type=str, default="self_attn", help="modulate attention type")
+    parser.add_argument("--modulate_timestep_frames_schedule", type=str, default="constant", help="modulate timestep frames schedule")
+    parser.add_argument("--feature_folder", type=str, default="features_outputs_svd_VSPW", help="feature folder path")
+    parser.add_argument("--exp_start_idx", type=int, default=0, help="experiment start index")
+    parser.add_argument("--num_exp", type=int, default=100, help="number of experiments to run")
+    parser.add_argument("--disable_latent_blending", default=False, action="store_true", help="whether to disable latent blending")
+    parser.add_argument("--inversion_type", type=str, default="add_noise", help="inversion type")
+    parser.add_argument("--is_refine_mask", default=False, action="store_true", help="whether to correct the mask")
+    parser.add_argument("--is_aggre_attn", default=False, action="store_true", help="whether to use multiple attention maps for kmeans mask extraction")
+    
+    args = parser.parse_args()
+
+    spec = build_dataset_spec(args)
+    sequences = list_sequences(spec)
+    if not sequences:
+        raise ValueError(f"No sequences found under {spec.color_root}")
+
+    if args.output_root:
+        feature_folder = args.output_root
+    elif args.dataset == "apollo":
+        feature_folder = "/data1/wangcl/project/VidSeg/apollo"
+    else:
+        feature_folder = args.feature_folder
+
+    if args.exp_start_idx + args.num_exp > len(sequences):
+        args.num_exp = len(sequences) - args.exp_start_idx
+    sequences = sequences[args.exp_start_idx:args.exp_start_idx + args.num_exp]
+
+    gpu_ids = _parse_gpu_ids(args.gpus)
+    if len(gpu_ids) <= 1:
+        gpu_id = gpu_ids[0] if gpu_ids else None
+        _run_worker(sequences, gpu_id, args, spec, feature_folder)
+    else:
+        chunks = [sequences[i::len(gpu_ids)] for i in range(len(gpu_ids))]
+        ctx = mp.get_context("spawn")
+        processes = []
+        for gpu_id, chunk in zip(gpu_ids, chunks):
+            if not chunk:
+                continue
+            process = ctx.Process(
+                target=_run_worker,
+                args=(
+                    chunk,
+                    gpu_id,
+                    args,
+                    spec,
+                    feature_folder,
+                ),
+            )
+            process.start()
+            processes.append(process)
+        for process in processes:
+            process.join()

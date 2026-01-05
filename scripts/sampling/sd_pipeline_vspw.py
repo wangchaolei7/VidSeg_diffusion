@@ -1,5 +1,7 @@
 import math
 import os
+import multiprocessing as mp
+import json
 from glob import glob
 from pathlib import Path
 from typing import Optional
@@ -27,6 +29,7 @@ from scripts.sampling.dataset_specs import (
     list_sequences,
     resolve_gt_mask_path,
 )
+from scripts.sampling.metrics_ovdg import OVDGMetrics
 from safetensors.torch import load_file as load_safetensors
 
 from tqdm import tqdm
@@ -651,100 +654,140 @@ def seed_everything(seed):
     torch.backends.cudnn.deterministic = True 
 
 
-if __name__ == "__main__":
-    # Fire(sample)
-    # change it to argparser
-    parser = argparse.ArgumentParser()
-    
-    parser.add_argument("--dataset_path", type=str, default="../dataset/vspw/VSPW_480p/data", help="path to the input dataset")
-    parser.add_argument("--split_file_path", type=str, default="../dataset/vspw/VSPW_480p/val.txt", help="path to the split file")
-    parser.add_argument("--dataset", type=str, default="vspw", choices=["vspw", "apollo"], help="dataset name")
-    parser.add_argument("--dataset_root", type=str, default="/home/wangcl/data/open_video_DGSS/ApolloScape", help="dataset root path")
-    parser.add_argument("--color_root", type=str, default=None, help="override color image root")
-    parser.add_argument("--mask_root", type=str, default=None, help="override gt mask root")
-    parser.add_argument("--mask_suffix", type=str, default="", help="mask filename suffix")
-    parser.add_argument("--mask_ext", type=str, default=".png", help="mask file extension")
-    parser.add_argument("--output_root", type=str, default=None, help="override output root")
-    parser.add_argument("--num_steps", type=int, default=25, help="number of steps")
-    parser.add_argument("--num_frames", type=int, default=14, help="number of frames")
-    parser.add_argument("--device", type=str, default="cuda", help="device")
-    parser.add_argument("--seed", type=int, default=1, help="seed for sampling")
-    parser.add_argument("--motion_bucket_id", type=int, default=127, help="motion bucket id")
-    parser.add_argument("--cond_aug", type=float, default=0.02, help="condition augmentation")
-    parser.add_argument("--modulate_block_idx", type=str, default="7", help="selected block idx")
-    parser.add_argument("--modulate_timestep", type=str, default="22", help="selected modulate timestep")
-    parser.add_argument("--feature_timestep", type=str, default="24", help="selected feature extraction timestep")
-    parser.add_argument("--modulate_schedule", type=str, default="constant", help="modulate lambda schedule")
-    parser.add_argument("--modulate_lambda_start", type=float, default=50.0, help="modulate lambda start")
-    parser.add_argument("--modulate_lambda_end", type=float, default=50.0, help="modulate lambda end")
-    parser.add_argument("--num_masks", type=int, default=20, help="number of masks to use")
-    parser.add_argument("--is_injected_features", default=False, action="store_true", help="whether to use injected features")
-    parser.add_argument("--modulate_layer_type", type=str, default="spatial", help="modulate layer type")
-    parser.add_argument("--modulate_attn_type", type=str, default="cross_attn", help="modulate attention type")
-    parser.add_argument("--modulate_timestep_frames_schedule", type=str, default="constant", help="modulate timestep frames schedule")
-    parser.add_argument("--feature_folder", type=str, default="features_outputs_sd_VSPW", help="feature folder path")
-    parser.add_argument("--exp_start_idx", type=int, default=0, help="experiment start index")
-    parser.add_argument("--num_exp", type=int, default=100, help="number of experiments to run")
-    parser.add_argument("--disable_latent_blending", default=False, action="store_true", help="whether to disable latent blending")
-    parser.add_argument("--inversion_type", type=str, default="add_noise", help="inversion type")
-    parser.add_argument("--is_refine_mask", default=False, action="store_true", help="whether to correct the mask")
-    parser.add_argument("--is_aggre_attn", default=False, action="store_true", help="whether to use multiple attentions")
+def _parse_gpu_ids(gpus):
+    if not gpus:
+        return []
+    return [int(x) for x in gpus.split(",") if x.strip()]
 
-    # Apollo example (15 classes): python scripts/sampling/sd_pipeline_vspw.py --dataset apollo --num_masks 15 --is_injected_features --is_refine_mask --is_aggre_attn
-    
-    args = parser.parse_args()
-    
+
+def _load_frame_names(input_video_path):
+    frame_files = [f for f in os.listdir(input_video_path) if f.endswith(".png") or f.endswith(".jpg")]
+    frame_files = sorted(frame_files, key=_frame_sort_key)
+    return [os.path.splitext(f)[0] for f in frame_files]
+
+
+def _resolve_seg_map_dir(feature_folder, exp_name, modulate_lambda_start):
+    seg_root = os.path.join(feature_folder, exp_name, "segmentation_map_raw")
+    if not os.path.isdir(seg_root):
+        return None
+    expected = os.path.join(seg_root, f"{0:06d}_l_{modulate_lambda_start}")
+    if os.path.isdir(expected):
+        return expected
+    candidates = [
+        d for d in os.listdir(seg_root) if os.path.isdir(os.path.join(seg_root, d))
+    ]
+    if not candidates:
+        return None
+    target = f"_l_{modulate_lambda_start}"
+    for name in candidates:
+        if target in name:
+            return os.path.join(seg_root, name)
+    return os.path.join(seg_root, sorted(candidates)[0])
+
+
+def _collect_video_preds_gts(input_video_path, pred_dir, mask_dir, mask_suffix, mask_ext):
+    frame_names = _load_frame_names(input_video_path)
+    preds = []
+    gts = []
+    missing_pred = 0
+    for frame_name in frame_names:
+        pred_path = os.path.join(pred_dir, f"{frame_name}.png")
+        if not os.path.isfile(pred_path):
+            missing_pred += 1
+            continue
+        pred = np.array(Image.open(pred_path))
+        gt_path = resolve_gt_mask_path(mask_dir, frame_name, mask_suffix, mask_ext)
+        gt = np.array(Image.open(gt_path)) if gt_path else None
+        preds.append(pred)
+        gts.append(gt)
+    return preds, gts, missing_pred, len(frame_names)
+
+
+def _write_metrics_outputs(feature_folder, metrics, tag=""):
+    summary = metrics.compute_summary()
+    def to_percent(val):
+        return round(float(val) * 100.0, 2) if val is not None and np.isfinite(val) else None
+
+    summary_out = {
+        "mIoU": to_percent(summary["mIoU"]),
+        "mAcc": to_percent(summary["mAcc"]),
+        "aAcc": to_percent(summary["aAcc"]),
+    }
+    for n in metrics.mvc_n_list:
+        summary_out[f"mVC{n}"] = to_percent(summary.get(f"mVC{n}", float("nan")))
+        summary_out[f"mVC{n}_videos"] = summary.get(f"mVC{n}_videos", 0)
+    summary_out["num_classes"] = metrics.num_classes
+    summary_out["ignore_index"] = metrics.ignore_index
+    summary_out["tc_stride"] = metrics.tc_stride
+
+    summary_path = os.path.join(feature_folder, f"metrics_summary{tag}.json")
+    with open(summary_path, "w", encoding="utf-8") as handle:
+        json.dump(summary_out, handle, indent=2)
+
+    per_class_path = os.path.join(feature_folder, f"metrics_per_class{tag}.csv")
+    per_class_iou = summary["per_class_iou"]
+    per_class_acc = summary["per_class_acc"]
+    with open(per_class_path, "w", encoding="utf-8") as handle:
+        handle.write("class_id,iou,acc\n")
+        for idx in range(metrics.num_classes):
+            iou_val = per_class_iou[idx]
+            acc_val = per_class_acc[idx]
+            iou_out = to_percent(iou_val) if np.isfinite(iou_val) else ""
+            acc_out = to_percent(acc_val) if np.isfinite(acc_val) else ""
+            handle.write(f"{idx},{iou_out},{acc_out}\n")
+
+    log_path = os.path.join(feature_folder, f"metrics_log{tag}.txt")
+    with open(log_path, "w", encoding="utf-8") as handle:
+        handle.write(json.dumps(summary_out, indent=2))
+        handle.write("\n")
+
+
+def run_sequences(
+    sequences,
+    device,
+    args,
+    spec,
+    feature_folder,
+    input_height,
+    input_width,
+    upsample_output,
+    run_id=None,
+    write_summary=False,
+):
+    if not sequences:
+        return
+    global model, exp_name
     num_frames = default(args.num_frames, 14)
     num_steps = default(args.num_steps, 25)
     model_config = "configs/inference/sd_2_1.yaml"
     ckpt = "/data1/wangcl/project/VidSeg/chechpoints/v2-1_512-ema-pruned.safetensors"
-    device = args.device
-    
+
     config = OmegaConf.load(model_config)
     config.model.params.sampler_config.params.num_steps = num_steps
     model = load_model_from_config(config, device, ckpt)
-    # model.en_and_decode_n_samples_a_time = 1
-    
+
     for param in model.model.parameters():
         param.requires_grad = False
-        
+
     model.denoiser = model.denoiser.to(device)
     model.model = model.model.to(device)
     model.first_stage_model = model.first_stage_model.to(device)
-    
+
     if args.disable_latent_blending:
         is_latent_blending = False
     else:
         is_latent_blending = True
     print(f"Is latent blending: {is_latent_blending}")
-    
-    
-    spec = build_dataset_spec(args)
-    sequences = list_sequences(spec)
-    if not sequences:
-        raise ValueError(f"No sequences found under {spec.color_root}")
 
-    input_height = None
-    input_width = None
-    upsample_output = False
-    if args.dataset == "apollo":
-        input_height = 512
-        input_width = 640
-        upsample_output = True
+    num_classes = 15 if args.dataset == "apollo" else 124
+    metrics = OVDGMetrics(
+        num_classes=num_classes,
+        ignore_index=255,
+        mvc_n=(8, 16),
+        tc_stride=4,
+    )
 
-    if args.output_root:
-        feature_folder = args.output_root
-    elif args.dataset == "apollo":
-        feature_folder = "/data1/wangcl/project/VidSeg/apollo"
-    else:
-        feature_folder = args.feature_folder
-
-    if args.exp_start_idx + args.num_exp > len(sequences):
-        args.num_exp = len(sequences) - args.exp_start_idx
-    sequences = sequences[args.exp_start_idx:args.exp_start_idx + args.num_exp]
-    
     print("We start from exp:", sequences[0][0])
-
     for exp_name, input_video_path, mask_dir in tqdm(sequences, desc="num_videos"):
         sample(
             input_video_path=input_video_path,
@@ -774,3 +817,176 @@ if __name__ == "__main__":
             input_height=input_height,
             input_width=input_width,
             upsample_output=upsample_output)
+        pred_dir = _resolve_seg_map_dir(feature_folder, exp_name, args.modulate_lambda_start)
+        if pred_dir is None:
+            continue
+        preds, gts, missing_pred, total_frames = _collect_video_preds_gts(
+            input_video_path,
+            pred_dir,
+            mask_dir,
+            spec.mask_suffix,
+            spec.mask_ext,
+        )
+        if preds:
+            metrics.update_video(preds, gts)
+        if missing_pred > 0:
+            print(f"Missing {missing_pred}/{total_frames} predictions for {exp_name}")
+
+    if run_id is not None:
+        part_path = os.path.join(feature_folder, f"metrics_part_{run_id}_{os.getpid()}.npz")
+        metrics.save_npz(part_path)
+    if write_summary:
+        _write_metrics_outputs(feature_folder, metrics)
+
+
+def _run_worker(
+    sequences,
+    gpu_id,
+    args,
+    spec,
+    feature_folder,
+    input_height,
+    input_width,
+    upsample_output,
+    run_id=None,
+    write_summary=False,
+):
+    device = args.device
+    if gpu_id is not None:
+        torch.cuda.set_device(gpu_id)
+        device = f"cuda:{gpu_id}"
+    run_sequences(
+        sequences,
+        device,
+        args,
+        spec,
+        feature_folder,
+        input_height,
+        input_width,
+        upsample_output,
+        run_id=run_id,
+        write_summary=write_summary,
+    )
+
+
+if __name__ == "__main__":
+    # Fire(sample)
+    # change it to argparser
+    parser = argparse.ArgumentParser()
+    
+    parser.add_argument("--dataset_path", type=str, default="../dataset/vspw/VSPW_480p/data", help="path to the input dataset")
+    parser.add_argument("--split_file_path", type=str, default="../dataset/vspw/VSPW_480p/val.txt", help="path to the split file")
+    parser.add_argument("--dataset", type=str, default="vspw", choices=["vspw", "apollo"], help="dataset name")
+    parser.add_argument("--dataset_root", type=str, default="/home/wangcl/data/open_video_DGSS/ApolloScape", help="dataset root path")
+    parser.add_argument("--color_root", type=str, default=None, help="override color image root")
+    parser.add_argument("--mask_root", type=str, default=None, help="override gt mask root")
+    parser.add_argument("--mask_suffix", type=str, default="", help="mask filename suffix")
+    parser.add_argument("--mask_ext", type=str, default=".png", help="mask file extension")
+    parser.add_argument("--output_root", type=str, default=None, help="override output root")
+    parser.add_argument("--num_steps", type=int, default=25, help="number of steps")
+    parser.add_argument("--num_frames", type=int, default=14, help="number of frames")
+    parser.add_argument("--gpus", type=str, default="", help="comma-separated gpu ids")
+    parser.add_argument("--device", type=str, default="cuda", help="device")
+    parser.add_argument("--seed", type=int, default=1, help="seed for sampling")
+    parser.add_argument("--motion_bucket_id", type=int, default=127, help="motion bucket id")
+    parser.add_argument("--cond_aug", type=float, default=0.02, help="condition augmentation")
+    parser.add_argument("--modulate_block_idx", type=str, default="7", help="selected block idx")
+    parser.add_argument("--modulate_timestep", type=str, default="22", help="selected modulate timestep")
+    parser.add_argument("--feature_timestep", type=str, default="24", help="selected feature extraction timestep")
+    parser.add_argument("--modulate_schedule", type=str, default="constant", help="modulate lambda schedule")
+    parser.add_argument("--modulate_lambda_start", type=float, default=50.0, help="modulate lambda start")
+    parser.add_argument("--modulate_lambda_end", type=float, default=50.0, help="modulate lambda end")
+    parser.add_argument("--num_masks", type=int, default=20, help="number of masks to use")
+    parser.add_argument("--is_injected_features", default=False, action="store_true", help="whether to use injected features")
+    parser.add_argument("--modulate_layer_type", type=str, default="spatial", help="modulate layer type")
+    parser.add_argument("--modulate_attn_type", type=str, default="cross_attn", help="modulate attention type")
+    parser.add_argument("--modulate_timestep_frames_schedule", type=str, default="constant", help="modulate timestep frames schedule")
+    parser.add_argument("--feature_folder", type=str, default="features_outputs_sd_VSPW", help="feature folder path")
+    parser.add_argument("--exp_start_idx", type=int, default=0, help="experiment start index")
+    parser.add_argument("--num_exp", type=int, default=100, help="number of experiments to run")
+    parser.add_argument("--disable_latent_blending", default=False, action="store_true", help="whether to disable latent blending")
+    parser.add_argument("--inversion_type", type=str, default="add_noise", help="inversion type")
+    parser.add_argument("--is_refine_mask", default=False, action="store_true", help="whether to correct the mask")
+    parser.add_argument("--is_aggre_attn", default=False, action="store_true", help="whether to use multiple attentions")
+
+    # Apollo example (15 classes): python scripts/sampling/sd_pipeline_vspw.py --dataset apollo --num_masks 15 --is_injected_features --is_refine_mask --is_aggre_attn
+    # Multi-GPU example: python scripts/sampling/sd_pipeline_vspw.py --dataset apollo --gpus 0,1 --num_masks 15 --is_injected_features --is_refine_mask --is_aggre_attn
+    
+    args = parser.parse_args()
+
+    spec = build_dataset_spec(args)
+    sequences = list_sequences(spec)
+    if not sequences:
+        raise ValueError(f"No sequences found under {spec.color_root}")
+
+    input_height = None
+    input_width = None
+    upsample_output = False
+    if args.dataset == "apollo":
+        input_height = 512
+        input_width = 640
+        upsample_output = True
+
+    if args.output_root:
+        feature_folder = args.output_root
+    elif args.dataset == "apollo":
+        feature_folder = "/data1/wangcl/project/VidSeg/apollo"
+    else:
+        feature_folder = args.feature_folder
+
+    if args.exp_start_idx + args.num_exp > len(sequences):
+        args.num_exp = len(sequences) - args.exp_start_idx
+    sequences = sequences[args.exp_start_idx:args.exp_start_idx + args.num_exp]
+
+    run_id = int(time.time())
+    gpu_ids = _parse_gpu_ids(args.gpus)
+    if len(gpu_ids) <= 1:
+        gpu_id = gpu_ids[0] if gpu_ids else None
+        _run_worker(
+            sequences,
+            gpu_id,
+            args,
+            spec,
+            feature_folder,
+            input_height,
+            input_width,
+            upsample_output,
+            run_id=run_id,
+            write_summary=True,
+        )
+    else:
+        chunks = [sequences[i::len(gpu_ids)] for i in range(len(gpu_ids))]
+        ctx = mp.get_context("spawn")
+        processes = []
+        for gpu_id, chunk in zip(gpu_ids, chunks):
+            if not chunk:
+                continue
+            process = ctx.Process(
+                target=_run_worker,
+                args=(
+                    chunk,
+                    gpu_id,
+                    args,
+                    spec,
+                    feature_folder,
+                    input_height,
+                    input_width,
+                    upsample_output,
+                ),
+                kwargs={"run_id": run_id, "write_summary": False},
+            )
+            process.start()
+            processes.append(process)
+        for process in processes:
+            process.join()
+
+        part_paths = glob(os.path.join(feature_folder, f"metrics_part_{run_id}_*.npz"))
+        num_classes = 15 if args.dataset == "apollo" else 124
+        merged = OVDGMetrics.merge_parts(
+            part_paths,
+            num_classes=num_classes,
+            ignore_index=255,
+            mvc_n=(8, 16),
+            tc_stride=4,
+        )
+        _write_metrics_outputs(feature_folder, merged)
