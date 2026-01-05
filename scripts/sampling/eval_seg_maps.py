@@ -114,13 +114,13 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset_path", type=str, default="../dataset/vspw/VSPW_480p/data")
     parser.add_argument("--split_file_path", type=str, default="../dataset/vspw/VSPW_480p/val.txt")
-    parser.add_argument("--dataset", type=str, default="apollo", choices=["vspw", "apollo"])
-    parser.add_argument("--dataset_root", type=str, default="/home/wangcl/data/open_video_DGSS/ApolloScape")
+    parser.add_argument("--dataset", type=str, default="apollo", choices=["vspw", "apollo", "camvid"])
+    parser.add_argument("--dataset_root", type=str, default=None)
     parser.add_argument("--color_root", type=str, default=None)
     parser.add_argument("--mask_root", type=str, default=None)
     parser.add_argument("--mask_suffix", type=str, default="")
     parser.add_argument("--mask_ext", type=str, default=".png")
-    parser.add_argument("--output_root", type=str, default="/data1/wangcl/project/VidSeg/apollo")
+    parser.add_argument("--output_root", type=str, default=None)
     parser.add_argument("--pred_folder", type=str, default="segmentation_map_raw")
     parser.add_argument("--modulate_lambda_start", type=float, default=50.0)
     parser.add_argument("--num_classes", type=int, default=None)
@@ -130,9 +130,17 @@ def main() -> None:
     args = parser.parse_args()
 
     mvc_n = [int(x) for x in args.mvc_n.split(",") if x.strip()]
+    if args.output_root is None:
+        if args.dataset == "apollo":
+            args.output_root = "/data1/wangcl/project/VidSeg/apollo"
+        elif args.dataset == "camvid":
+            args.output_root = "/data1/wangcl/project/VidSeg/camvid"
+        else:
+            args.output_root = "/data1/wangcl/project/VidSeg"
+
     num_classes = args.num_classes
     if num_classes is None:
-        num_classes = 15 if args.dataset == "apollo" else 124
+        num_classes = 15 if args.dataset in ["apollo", "camvid"] else 124
 
     spec = build_dataset_spec(args)
     sequences = list_sequences(spec)

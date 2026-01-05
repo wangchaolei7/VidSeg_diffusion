@@ -35,10 +35,16 @@ def _vspw_sort_key(name: str):
 def build_dataset_spec(args) -> DatasetSpec:
     dataset = getattr(args, "dataset", "vspw")
     if dataset == "apollo":
-        dataset_root = args.dataset_root
+        dataset_root = args.dataset_root or "/home/wangcl/data/open_video_DGSS/ApolloScape"
         color_root = args.color_root or os.path.join(dataset_root, "val", "ColorImage")
         mask_root = args.mask_root or os.path.join(dataset_root, "val", "15Label")
         mask_suffix = args.mask_suffix if args.mask_suffix != "" else "_bin"
+        split_file = getattr(args, "split_file_path", None)
+    elif dataset == "camvid":
+        dataset_root = args.dataset_root or "/home/wangcl/data/open_video_DGSS/CamVid"
+        color_root = args.color_root or os.path.join(dataset_root, "val", "images")
+        mask_root = args.mask_root or os.path.join(dataset_root, "val", "15labels")
+        mask_suffix = args.mask_suffix if args.mask_suffix != "" else "_L"
         split_file = getattr(args, "split_file_path", None)
     else:
         color_root = args.color_root or args.dataset_path

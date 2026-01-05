@@ -779,7 +779,7 @@ def run_sequences(
         is_latent_blending = True
     print(f"Is latent blending: {is_latent_blending}")
 
-    num_classes = 15 if args.dataset == "apollo" else 124
+    num_classes = 15 if args.dataset in ["apollo", "camvid"] else 124
     metrics = OVDGMetrics(
         num_classes=num_classes,
         ignore_index=255,
@@ -876,8 +876,8 @@ if __name__ == "__main__":
     
     parser.add_argument("--dataset_path", type=str, default="../dataset/vspw/VSPW_480p/data", help="path to the input dataset")
     parser.add_argument("--split_file_path", type=str, default="../dataset/vspw/VSPW_480p/val.txt", help="path to the split file")
-    parser.add_argument("--dataset", type=str, default="vspw", choices=["vspw", "apollo"], help="dataset name")
-    parser.add_argument("--dataset_root", type=str, default="/home/wangcl/data/open_video_DGSS/ApolloScape", help="dataset root path")
+    parser.add_argument("--dataset", type=str, default="vspw", choices=["vspw", "apollo", "camvid"], help="dataset name")
+    parser.add_argument("--dataset_root", type=str, default=None, help="dataset root path")
     parser.add_argument("--color_root", type=str, default=None, help="override color image root")
     parser.add_argument("--mask_root", type=str, default=None, help="override gt mask root")
     parser.add_argument("--mask_suffix", type=str, default="", help="mask filename suffix")
@@ -922,7 +922,7 @@ if __name__ == "__main__":
     input_height = None
     input_width = None
     upsample_output = False
-    if args.dataset == "apollo":
+    if args.dataset in ["apollo", "camvid"]:
         input_height = 512
         input_width = 640
         upsample_output = True
@@ -931,6 +931,8 @@ if __name__ == "__main__":
         feature_folder = args.output_root
     elif args.dataset == "apollo":
         feature_folder = "/data1/wangcl/project/VidSeg/apollo"
+    elif args.dataset == "camvid":
+        feature_folder = "/data1/wangcl/project/VidSeg/camvid"
     else:
         feature_folder = args.feature_folder
 
@@ -981,7 +983,7 @@ if __name__ == "__main__":
             process.join()
 
         part_paths = glob(os.path.join(feature_folder, f"metrics_part_{run_id}_*.npz"))
-        num_classes = 15 if args.dataset == "apollo" else 124
+        num_classes = 15 if args.dataset in ["apollo", "camvid"] else 124
         merged = OVDGMetrics.merge_parts(
             part_paths,
             num_classes=num_classes,
