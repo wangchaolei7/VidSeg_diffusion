@@ -251,6 +251,8 @@ def sample(
     ref_mask = None
     ref_feature_map = None
     ref_unique_labels = None
+    ref_has_gt = False
+    input_mask_path = mask_dir if mask_dir else input_video_path.replace("origin", "mask")
     # process frame_img_list with batch_size
     num_batches = len(frame_img_list) // batch_size + 1
     
@@ -400,20 +402,28 @@ def sample(
                 feature_types = "spatial_self_attn_q"
                 feature_height = H // (F * 2)
                 feature_width = W // (F * 2)
-                input_mask_path = mask_dir if mask_dir else input_video_path.replace("origin", "mask")
-                if batch_id == 0:
-                    gt_mask_path = resolve_gt_mask_path(
-                        input_mask_path, frame_name_list_batch[0], mask_suffix, mask_ext
-                    )
-                else:
-                    gt_mask_path = None
+                gt_mask_path = None
+                gt_frame_idx = None
+                if not ref_has_gt:
+                    for idx, frame_name in enumerate(frame_name_list_batch):
+                        candidate = resolve_gt_mask_path(input_mask_path, frame_name, mask_suffix, mask_ext)
+                        if candidate:
+                            gt_mask_path = candidate
+                            gt_frame_idx = idx
+                            break
+                if gt_mask_path is not None and not ref_has_gt:
+                    ref_mask = None
+                    ref_feature_map = None
+                    ref_unique_labels = None
                 unique_labels, ref_mask, ref_feature_map = feature_extraction_main(mode, num_clusters, t_start, block_name, experiment_name, fit_experiments, feature_types, 
                                         feature_height, feature_width, feature_timestep, 
                                         frame_name_list=frame_name_list_batch, base_folder=feature_folder, num_frames=num_frames,
                                         ref_mask=ref_mask, ref_feature_map=ref_feature_map, ref_unique_labels=ref_unique_labels,
-                                        gt_mask_path=gt_mask_path)
-                if batch_id == 0: 
-                    ref_unique_labels = unique_labels    
+                                        gt_mask_path=gt_mask_path, gt_frame_idx=gt_frame_idx)
+                if ref_unique_labels is None or gt_mask_path is not None:
+                    ref_unique_labels = unique_labels
+                    if gt_mask_path is not None:
+                        ref_has_gt = True
                 print(f"per batch unique_labels: {unique_labels}")
                 block_name_list = block_name.split(',')
                 if len(block_name_list) == 1:
@@ -666,6 +676,18 @@ def _load_frame_names(input_video_path):
     return [os.path.splitext(f)[0] for f in frame_files]
 
 
+def _load_cityscapes_gt_bases(mask_dir, mask_suffix, mask_ext):
+    if not mask_dir or not os.path.isdir(mask_dir):
+        return []
+    suffix = f"{mask_suffix}{mask_ext}"
+    base_names = []
+    for fname in os.listdir(mask_dir):
+        if not fname.endswith(suffix):
+            continue
+        base_names.append(fname[: -len(suffix)])
+    return sorted(base_names, key=_frame_sort_key)
+
+
 def _resolve_seg_map_dir(feature_folder, exp_name, modulate_lambda_start):
     seg_root = os.path.join(feature_folder, exp_name, "segmentation_map_raw")
     if not os.path.isdir(seg_root):
@@ -685,8 +707,12 @@ def _resolve_seg_map_dir(feature_folder, exp_name, modulate_lambda_start):
     return os.path.join(seg_root, sorted(candidates)[0])
 
 
-def _collect_video_preds_gts(input_video_path, pred_dir, mask_dir, mask_suffix, mask_ext):
-    frame_names = _load_frame_names(input_video_path)
+def _collect_video_preds_gts(input_video_path, pred_dir, mask_dir, mask_suffix, mask_ext, dataset_name):
+    if dataset_name in ["cityscapes_origin", "cityscapes_corruptions"]:
+        base_names = _load_cityscapes_gt_bases(mask_dir, mask_suffix, mask_ext)
+        frame_names = [f"{base}_leftImg8bit" for base in base_names]
+    else:
+        frame_names = _load_frame_names(input_video_path)
     preds = []
     gts = []
     missing_pred = 0
@@ -779,7 +805,7 @@ def run_sequences(
         is_latent_blending = True
     print(f"Is latent blending: {is_latent_blending}")
 
-    num_classes = 15 if args.dataset in ["apollo", "camvid"] else 124
+    num_classes = 15 if args.dataset in ["apollo", "camvid", "cityscapes_origin", "cityscapes_corruptions"] else 124
     metrics = OVDGMetrics(
         num_classes=num_classes,
         ignore_index=255,
@@ -826,6 +852,7 @@ def run_sequences(
             mask_dir,
             spec.mask_suffix,
             spec.mask_ext,
+            args.dataset,
         )
         if preds:
             metrics.update_video(preds, gts)
@@ -876,13 +903,26 @@ if __name__ == "__main__":
     
     parser.add_argument("--dataset_path", type=str, default="../dataset/vspw/VSPW_480p/data", help="path to the input dataset")
     parser.add_argument("--split_file_path", type=str, default="../dataset/vspw/VSPW_480p/val.txt", help="path to the split file")
-    parser.add_argument("--dataset", type=str, default="vspw", choices=["vspw", "apollo", "camvid"], help="dataset name")
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        default="vspw",
+        choices=["vspw", "apollo", "camvid", "cityscapes_origin", "cityscapes_corruptions"],
+        help="dataset name",
+    )
     parser.add_argument("--dataset_root", type=str, default=None, help="dataset root path")
     parser.add_argument("--color_root", type=str, default=None, help="override color image root")
     parser.add_argument("--mask_root", type=str, default=None, help="override gt mask root")
     parser.add_argument("--mask_suffix", type=str, default="", help="mask filename suffix")
     parser.add_argument("--mask_ext", type=str, default=".png", help="mask file extension")
     parser.add_argument("--output_root", type=str, default=None, help="override output root")
+    parser.add_argument(
+        "--corruption",
+        type=str,
+        default=None,
+        choices=["fog", "frost", "snow", "spatter"],
+        help="corruption type for cityscapes_corruptions",
+    )
     parser.add_argument("--num_steps", type=int, default=25, help="number of steps")
     parser.add_argument("--num_frames", type=int, default=14, help="number of frames")
     parser.add_argument("--gpus", type=str, default="", help="comma-separated gpu ids")
@@ -903,13 +943,15 @@ if __name__ == "__main__":
     parser.add_argument("--modulate_timestep_frames_schedule", type=str, default="constant", help="modulate timestep frames schedule")
     parser.add_argument("--feature_folder", type=str, default="features_outputs_sd_VSPW", help="feature folder path")
     parser.add_argument("--exp_start_idx", type=int, default=0, help="experiment start index")
-    parser.add_argument("--num_exp", type=int, default=100, help="number of experiments to run")
+    parser.add_argument("--num_exp", type=int, default=1000, help="number of experiments to run")
     parser.add_argument("--disable_latent_blending", default=False, action="store_true", help="whether to disable latent blending")
     parser.add_argument("--inversion_type", type=str, default="add_noise", help="inversion type")
     parser.add_argument("--is_refine_mask", default=False, action="store_true", help="whether to correct the mask")
     parser.add_argument("--is_aggre_attn", default=False, action="store_true", help="whether to use multiple attentions")
 
     # Apollo example (15 classes): python scripts/sampling/sd_pipeline_vspw.py --dataset apollo --num_masks 15 --is_injected_features --is_refine_mask --is_aggre_attn
+    # Cityscapes origin example: python scripts/sampling/sd_pipeline_vspw.py --dataset cityscapes_origin --num_masks 15 --is_injected_features --is_refine_mask --is_aggre_attn
+    # Cityscapes corruptions example (fog): python scripts/sampling/sd_pipeline_vspw.py --dataset cityscapes_corruptions --corruption fog --num_masks 15 --is_injected_features --is_refine_mask --is_aggre_attn
     # Multi-GPU example: python scripts/sampling/sd_pipeline_vspw.py --dataset apollo --gpus 0,1 --num_masks 15 --is_injected_features --is_refine_mask --is_aggre_attn
     
     args = parser.parse_args()
@@ -926,6 +968,10 @@ if __name__ == "__main__":
         input_height = 512
         input_width = 640
         upsample_output = True
+    elif args.dataset in ["cityscapes_origin", "cityscapes_corruptions"]:
+        input_height = 256
+        input_width = 512
+        upsample_output = True
 
     if args.output_root:
         feature_folder = args.output_root
@@ -933,6 +979,12 @@ if __name__ == "__main__":
         feature_folder = "/data1/wangcl/project/VidSeg/apollo"
     elif args.dataset == "camvid":
         feature_folder = "/data1/wangcl/project/VidSeg/camvid"
+    elif args.dataset == "cityscapes_origin":
+        feature_folder = "/data1/wangcl/project/VidSeg/cityscapes_origin"
+    elif args.dataset == "cityscapes_corruptions":
+        if not args.corruption:
+            raise ValueError("corruption is required for cityscapes_corruptions")
+        feature_folder = os.path.join("/data1/wangcl/project/VidSeg/cityscapes_corruptions", args.corruption)
     else:
         feature_folder = args.feature_folder
 
@@ -983,7 +1035,7 @@ if __name__ == "__main__":
             process.join()
 
         part_paths = glob(os.path.join(feature_folder, f"metrics_part_{run_id}_*.npz"))
-        num_classes = 15 if args.dataset in ["apollo", "camvid"] else 124
+        num_classes = 15 if args.dataset in ["apollo", "camvid", "cityscapes_origin", "cityscapes_corruptions"] else 124
         merged = OVDGMetrics.merge_parts(
             part_paths,
             num_classes=num_classes,

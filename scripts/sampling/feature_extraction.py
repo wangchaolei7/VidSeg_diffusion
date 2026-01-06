@@ -543,9 +543,9 @@ def convert_label_to_rgb(clustered_tensor):
 
     return rgb_image
 
-def match_gt_mask(feature_maps, gt_mask_path, feature_height, feature_width, output_folder, num_masks, 
+def match_gt_mask(feature_maps, gt_mask_path, feature_height, feature_width, output_folder, num_masks,
                         selected_timestep=24, frame_name_list=None, ref_mask=None, ref_feature_map=None,
-                        ref_unique_labels=None, use_gt_mask=False):
+                        ref_unique_labels=None, gt_frame_idx=None, use_gt_mask=False):
     feature_maps = feature_maps.cpu().numpy()
     num_frames = feature_maps.shape[0] // 2
     feature_maps = feature_maps[num_frames:]
@@ -564,12 +564,19 @@ def match_gt_mask(feature_maps, gt_mask_path, feature_height, feature_width, out
     output_folder_name = output_folder.split("/")[-1] + f"_masks_{num_masks}"
     output_folder = output_folder.replace(output_folder.split("/")[-1], output_folder_name)
 
+    if gt_frame_idx is None:
+        gt_frame_idx = 0
+    else:
+        gt_frame_idx = int(gt_frame_idx)
+    if gt_frame_idx < 0 or gt_frame_idx >= feature_maps.shape[0]:
+        gt_frame_idx = 0
+
     if ref_mask is None:
         feature_maps_split_fit = rearrange(feature_maps, 'b t c -> (b t) c')
         
         kmeans.fit(feature_maps_split_fit)
 
-        cluster_labels = kmeans.predict(feature_maps[0])
+        cluster_labels = kmeans.predict(feature_maps[gt_frame_idx])
         cluster_labels = np.reshape(cluster_labels, (h, w))
         cluster_labels_image = Image.fromarray(convert_label_to_rgb(cluster_labels))
         os.makedirs(output_folder, exist_ok=True)
@@ -597,7 +604,7 @@ def match_gt_mask(feature_maps, gt_mask_path, feature_height, feature_width, out
             assert gt_mask_path is not None
             ref_mask = mask_np
             
-        ref_feature_map = feature_maps[0]
+        ref_feature_map = feature_maps[gt_frame_idx]
         
         
     if ref_unique_labels is None:
@@ -668,8 +675,8 @@ def load_experiments_features(feature_maps_paths, blocks, feature_type, t, frame
     return feature_maps
                     
 def feature_extraction_main(mode, num_clusters, t_start, block_name, experiment_name, fit_experiments, feature_types, feature_height, feature_width, selected_timestep,
-                            frame_name_list=None, base_folder=None, 
-                            ref_mask=None, ref_feature_map=None, ref_unique_labels=None, gt_mask_path=None,
+                            frame_name_list=None, base_folder=None,
+                            ref_mask=None, ref_feature_map=None, ref_unique_labels=None, gt_mask_path=None, gt_frame_idx=None,
                             num_frames=None, mask_folder=None, use_gt_mask=False):
     if base_folder is None:
         exp_path_root = "features_outputs"
@@ -777,6 +784,7 @@ def feature_extraction_main(mode, num_clusters, t_start, block_name, experiment_
                                     ref_mask=ref_mask,
                                     ref_feature_map=ref_feature_map,
                                     ref_unique_labels=ref_unique_labels,
+                                    gt_frame_idx=gt_frame_idx,
                                     use_gt_mask=use_gt_mask)
             
             elif mode == "correct_low_res_mask":

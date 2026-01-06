@@ -23,6 +23,18 @@ def _load_frame_names(color_dir: str) -> List[str]:
     return [os.path.splitext(f)[0] for f in frame_files]
 
 
+def _load_cityscapes_gt_bases(mask_dir: str, mask_suffix: str, mask_ext: str) -> List[str]:
+    if not mask_dir or not os.path.isdir(mask_dir):
+        return []
+    suffix = f"{mask_suffix}{mask_ext}"
+    base_names = []
+    for fname in os.listdir(mask_dir):
+        if not fname.endswith(suffix):
+            continue
+        base_names.append(fname[: -len(suffix)])
+    return sorted(base_names, key=_frame_sort_key)
+
+
 def _resolve_pred_dir(output_root: str, exp_name: str, pred_folder: str, modulate_lambda_start: float) -> Optional[str]:
     seg_root = os.path.join(output_root, exp_name, pred_folder)
     if not os.path.isdir(seg_root):
@@ -114,13 +126,25 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--dataset_path", type=str, default="../dataset/vspw/VSPW_480p/data")
     parser.add_argument("--split_file_path", type=str, default="../dataset/vspw/VSPW_480p/val.txt")
-    parser.add_argument("--dataset", type=str, default="apollo", choices=["vspw", "apollo", "camvid"])
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        default="apollo",
+        choices=["vspw", "apollo", "camvid", "cityscapes_origin", "cityscapes_corruptions"],
+    )
     parser.add_argument("--dataset_root", type=str, default=None)
     parser.add_argument("--color_root", type=str, default=None)
     parser.add_argument("--mask_root", type=str, default=None)
     parser.add_argument("--mask_suffix", type=str, default="")
     parser.add_argument("--mask_ext", type=str, default=".png")
     parser.add_argument("--output_root", type=str, default=None)
+    parser.add_argument(
+        "--corruption",
+        type=str,
+        default=None,
+        choices=["fog", "frost", "snow", "spatter"],
+        help="corruption type for cityscapes_corruptions",
+    )
     parser.add_argument("--pred_folder", type=str, default="segmentation_map_raw")
     parser.add_argument("--modulate_lambda_start", type=float, default=50.0)
     parser.add_argument("--num_classes", type=int, default=None)
@@ -135,12 +159,21 @@ def main() -> None:
             args.output_root = "/data1/wangcl/project/VidSeg/apollo"
         elif args.dataset == "camvid":
             args.output_root = "/data1/wangcl/project/VidSeg/camvid"
+        elif args.dataset == "cityscapes_origin":
+            args.output_root = "/data1/wangcl/project/VidSeg/cityscapes_origin"
+        elif args.dataset == "cityscapes_corruptions":
+            if not args.corruption:
+                raise ValueError("corruption is required for cityscapes_corruptions")
+            args.output_root = os.path.join(
+                "/data1/wangcl/project/VidSeg/cityscapes_corruptions",
+                args.corruption,
+            )
         else:
             args.output_root = "/data1/wangcl/project/VidSeg"
 
     num_classes = args.num_classes
     if num_classes is None:
-        num_classes = 15 if args.dataset in ["apollo", "camvid"] else 124
+        num_classes = 15 if args.dataset in ["apollo", "camvid", "cityscapes_origin", "cityscapes_corruptions"] else 124
 
     spec = build_dataset_spec(args)
     sequences = list_sequences(spec)
@@ -158,7 +191,11 @@ def main() -> None:
         pred_dir = _resolve_pred_dir(args.output_root, exp_name, args.pred_folder, args.modulate_lambda_start)
         if pred_dir is None:
             continue
-        frame_names = _load_frame_names(color_dir)
+        if args.dataset in ["cityscapes_origin", "cityscapes_corruptions"]:
+            base_names = _load_cityscapes_gt_bases(mask_dir, spec.mask_suffix, spec.mask_ext)
+            frame_names = [f"{base}_leftImg8bit" for base in base_names]
+        else:
+            frame_names = _load_frame_names(color_dir)
         preds = []
         gts = []
         missing_pred = 0

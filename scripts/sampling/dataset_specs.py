@@ -46,6 +46,23 @@ def build_dataset_spec(args) -> DatasetSpec:
         mask_root = args.mask_root or os.path.join(dataset_root, "val", "15labels")
         mask_suffix = args.mask_suffix if args.mask_suffix != "" else "_L"
         split_file = getattr(args, "split_file_path", None)
+    elif dataset == "cityscapes_origin":
+        dataset_root = args.dataset_root or "/home/wangcl/data/open_video_DGSS/cityscapes_sequence"
+        color_root = args.color_root or os.path.join(dataset_root, "origin_leftImg8bit_sequence")
+        mask_root = args.mask_root or os.path.join(dataset_root, "gtFine")
+        mask_suffix = args.mask_suffix if args.mask_suffix != "" else "_gtFine_label14TrainIds"
+        split_file = None
+    elif dataset == "cityscapes_corruptions":
+        dataset_root = args.dataset_root or "/home/wangcl/data/open_video_DGSS/cityscapes_sequence"
+        corruption = getattr(args, "corruption", None)
+        if not corruption:
+            raise ValueError("corruption is required for cityscapes_corruptions")
+        color_root = args.color_root or os.path.join(
+            dataset_root, "leftImg8bit_sequence_Corruptions", corruption
+        )
+        mask_root = args.mask_root or os.path.join(dataset_root, "gtFine")
+        mask_suffix = args.mask_suffix if args.mask_suffix != "" else "_gtFine_label14TrainIds"
+        split_file = None
     else:
         color_root = args.color_root or args.dataset_path
         mask_root = args.mask_root or args.dataset_path
@@ -64,6 +81,30 @@ def build_dataset_spec(args) -> DatasetSpec:
 
 
 def list_sequences(spec: DatasetSpec) -> List[Tuple[str, str, str]]:
+    if spec.name in ["cityscapes_origin", "cityscapes_corruptions"]:
+        seq_dirs = {}
+        for root, _, files in os.walk(spec.color_root):
+            if not any(f.endswith(".png") or f.endswith(".jpg") for f in files):
+                continue
+            rel = os.path.relpath(root, spec.color_root)
+            parts = rel.split(os.sep)
+            if len(parts) >= 2:
+                seq_rel = os.path.join(parts[0], parts[1])
+            elif len(parts) == 1:
+                seq_rel = parts[0]
+            else:
+                continue
+            seq_dirs[seq_rel] = os.path.join(spec.color_root, seq_rel)
+        exp_names = sorted(seq_dirs.keys())
+        return [
+            (
+                exp_name,
+                seq_dirs[exp_name],
+                os.path.join(spec.mask_root, exp_name),
+            )
+            for exp_name in exp_names
+        ]
+
     if spec.split_file and os.path.isfile(spec.split_file):
         exp_names = _read_split_file(spec.split_file)
     else:
@@ -98,7 +139,10 @@ def list_sequences(spec: DatasetSpec) -> List[Tuple[str, str, str]]:
 def resolve_gt_mask_path(mask_dir: Optional[str], frame_name: str, suffix: str, ext: str) -> Optional[str]:
     if not mask_dir:
         return None
-    gt_mask_path = os.path.join(mask_dir, f"{frame_name}{suffix}{ext}")
+    frame_base = frame_name
+    if suffix.endswith("gtFine_label14TrainIds") and frame_name.endswith("_leftImg8bit"):
+        frame_base = frame_name[: -len("_leftImg8bit")]
+    gt_mask_path = os.path.join(mask_dir, f"{frame_base}{suffix}{ext}")
     if not os.path.isfile(gt_mask_path):
         return None
     return gt_mask_path
