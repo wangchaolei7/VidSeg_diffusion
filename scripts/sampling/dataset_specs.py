@@ -83,10 +83,11 @@ def build_dataset_spec(args) -> DatasetSpec:
 def list_sequences(spec: DatasetSpec) -> List[Tuple[str, str, str]]:
     if spec.name in ["cityscapes_origin", "cityscapes_corruptions"]:
         seq_dirs = {}
-        for root, _, files in os.walk(spec.color_root):
-            if not any(f.endswith(".png") or f.endswith(".jpg") for f in files):
+        suffix = f"{spec.mask_suffix}{spec.mask_ext}"
+        for root, _, files in os.walk(spec.mask_root):
+            if not any(f.endswith(suffix) for f in files):
                 continue
-            rel = os.path.relpath(root, spec.color_root)
+            rel = os.path.relpath(root, spec.mask_root)
             parts = rel.split(os.sep)
             if len(parts) >= 2:
                 seq_rel = os.path.join(parts[0], parts[1])
@@ -94,7 +95,10 @@ def list_sequences(spec: DatasetSpec) -> List[Tuple[str, str, str]]:
                 seq_rel = parts[0]
             else:
                 continue
-            seq_dirs[seq_rel] = os.path.join(spec.color_root, seq_rel)
+            color_dir = os.path.join(spec.color_root, seq_rel)
+            if not os.path.isdir(color_dir):
+                continue
+            seq_dirs[seq_rel] = color_dir
         exp_names = sorted(seq_dirs.keys())
         return [
             (
