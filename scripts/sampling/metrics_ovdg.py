@@ -10,10 +10,12 @@ class OVDGMetrics:
         ignore_index: int = 255,
         mvc_n: Sequence[int] = (8, 16),
         tc_stride: int = 4,
+        citys_sim_thresh: float = 20,
     ) -> None:
         self.num_classes = int(num_classes)
         self.ignore_index = int(ignore_index)
         self.tc_stride = max(1, int(tc_stride))
+        self.citys_sim_thresh = float(citys_sim_thresh)
         self.mvc_n_list = sorted({max(1, int(x)) for x in mvc_n})
 
         self.conf_mat = np.zeros((self.num_classes, self.num_classes), dtype=np.int64)
@@ -96,13 +98,71 @@ class OVDGMetrics:
             return None
         return float(np.mean(vals))
 
-    def update_video(self, preds: List[np.ndarray], gts: List[Optional[np.ndarray]]) -> None:
+    def _compute_vc_citys_sparse(
+        self,
+        preds: List[np.ndarray],
+        imgs: List[np.ndarray],
+        ref_gt: Optional[np.ndarray],
+        ref_img: Optional[np.ndarray],
+        n: int,
+    ) -> Optional[float]:
+        length = len(preds)
+        if length < n:
+            return None
+        if ref_gt is None or ref_img is None:
+            return None
+        if len(imgs) != length:
+            return None
+        if any(img is None for img in imgs):
+            return None
+
+        vals = []
+        ref_gt_valid = (ref_gt != self.ignore_index)
+        for start in range(0, length - n + 1):
+            pred_win = preds[start : start + n]
+            img_win = imgs[start : start + n]
+
+            static_all = np.ones(ref_img.shape, dtype=bool)
+            for img_t in img_win:
+                diff = np.abs(img_t.astype(np.int16) - ref_img.astype(np.int16))
+                static_all &= (diff <= self.citys_sim_thresh)
+
+            m_common = static_all & ref_gt_valid
+            denom = int(m_common.sum())
+            if denom == 0:
+                continue
+
+            pred0 = pred_win[0]
+            pred_equal = np.ones(pred0.shape, dtype=bool)
+            for pred in pred_win[1:]:
+                pred_equal &= (pred == pred0)
+
+            num = int((m_common & pred_equal & (pred0 == ref_gt)).sum())
+            vals.append(num / denom)
+        if not vals:
+            return None
+        return float(np.mean(vals))
+
+    def update_video(
+        self,
+        preds: List[np.ndarray],
+        gts: List[Optional[np.ndarray]],
+        imgs: Optional[List[Optional[np.ndarray]]] = None,
+        ref_gt: Optional[np.ndarray] = None,
+        ref_img: Optional[np.ndarray] = None,
+        use_citys_sparse: bool = False,
+    ) -> None:
         if len(preds) != len(gts):
             raise ValueError("preds and gts must have same length")
+        if imgs is not None and len(imgs) != len(preds):
+            raise ValueError("imgs and preds must have same length")
 
         s = self.tc_stride
         preds_small = []
         gts_small: List[Optional[np.ndarray]] = []
+        imgs_small: List[Optional[np.ndarray]] = []
+        if imgs is None:
+            imgs = [None] * len(preds)
         for pred, gt in zip(preds, gts):
             pred_small = pred[::s, ::s] if s > 1 else pred
             preds_small.append(pred_small)
@@ -112,11 +172,21 @@ class OVDGMetrics:
                 gt_small = gt[::s, ::s] if s > 1 else gt
                 gts_small.append(gt_small)
                 self.update_confusion(pred, gt)
+        for img in imgs:
+            if img is None:
+                imgs_small.append(None)
+            else:
+                img_small = img[::s, ::s] if s > 1 else img
+                imgs_small.append(img_small)
 
         dense_gt = all(x is not None for x in gts_small)
+        ref_gt_small = ref_gt[::s, ::s] if ref_gt is not None and s > 1 else ref_gt
+        ref_img_small = ref_img[::s, ::s] if ref_img is not None and s > 1 else ref_img
         for n in self.mvc_n_list:
             vc_val = None
-            if dense_gt:
+            if use_citys_sparse:
+                vc_val = self._compute_vc_citys_sparse(preds_small, imgs_small, ref_gt_small, ref_img_small, n)
+            elif dense_gt:
                 vc_val = self._compute_vc_dense(preds_small, [x for x in gts_small if x is not None], n)
             else:
                 vc_val = self._compute_vc_sparse_valid_windows(preds_small, gts_small, n)
