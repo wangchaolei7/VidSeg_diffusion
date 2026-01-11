@@ -80,6 +80,7 @@ def sample(
     input_height: Optional[int] = None,
     input_width: Optional[int] = None,
     upsample_output: bool = False,
+    resize_mode: str = "stretch",
 ):
 
     
@@ -121,6 +122,18 @@ def sample(
             sub_masks.append(sub_mask)
             
         return sub_masks
+
+    def resize_with_aspect_crop(image, target_width, target_height):
+        orig_w, orig_h = image.size
+        if orig_w == 0 or orig_h == 0:
+            return image.resize((target_width, target_height))
+        scale = max(target_width / orig_w, target_height / orig_h)
+        new_w = int(math.ceil(orig_w * scale))
+        new_h = int(math.ceil(orig_h * scale))
+        image = image.resize((new_w, new_h), Image.BICUBIC)
+        left = max(0, (new_w - target_width) // 2)
+        top = max(0, (new_h - target_height) // 2)
+        return image.crop((left, top, left + target_width, top + target_height))
     
     def ddim_sampler_callback(xt, i):
         save_feature_maps_callback(i, xt=xt)
@@ -241,7 +254,10 @@ def sample(
             output_size = (ori_w, ori_h)
 
         if input_height is not None and input_width is not None:
-            frame_img = frame_img.resize((input_width, input_height))
+            if resize_mode == "aspect_crop":
+                frame_img = resize_with_aspect_crop(frame_img, input_width, input_height)
+            else:
+                frame_img = frame_img.resize((input_width, input_height))
         elif ori_h % 64 != 0 or ori_w % 64 != 0:
             width, height = map(lambda x: x - x % 64, (ori_w, ori_h))
             frame_img = frame_img.resize((width, height))
@@ -777,6 +793,7 @@ def run_sequences(
     input_height,
     input_width,
     upsample_output,
+    resize_mode,
     run_id=None,
     write_summary=False,
 ):
@@ -805,7 +822,7 @@ def run_sequences(
         is_latent_blending = True
     print(f"Is latent blending: {is_latent_blending}")
 
-    num_classes = 15 if args.dataset in ["apollo", "camvid", "cityscapes_origin", "cityscapes_corruptions"] else 124
+    num_classes = 15 if args.dataset in ["apollo", "camvid", "cityscapes_origin", "cityscapes_corruptions", "kitti360"] else 124
     metrics = OVDGMetrics(
         num_classes=num_classes,
         ignore_index=255,
@@ -842,7 +859,8 @@ def run_sequences(
             mask_ext=spec.mask_ext,
             input_height=input_height,
             input_width=input_width,
-            upsample_output=upsample_output)
+            upsample_output=upsample_output,
+            resize_mode=resize_mode)
         pred_dir = _resolve_seg_map_dir(feature_folder, exp_name, args.modulate_lambda_start)
         if pred_dir is None:
             continue
@@ -875,6 +893,7 @@ def _run_worker(
     input_height,
     input_width,
     upsample_output,
+    resize_mode,
     run_id=None,
     write_summary=False,
 ):
@@ -891,6 +910,7 @@ def _run_worker(
         input_height,
         input_width,
         upsample_output,
+        resize_mode,
         run_id=run_id,
         write_summary=write_summary,
     )
@@ -907,7 +927,7 @@ if __name__ == "__main__":
         "--dataset",
         type=str,
         default="vspw",
-        choices=["vspw", "apollo", "camvid", "cityscapes_origin", "cityscapes_corruptions"],
+        choices=["vspw", "apollo", "camvid", "cityscapes_origin", "cityscapes_corruptions", "kitti360"],
         help="dataset name",
     )
     parser.add_argument("--dataset_root", type=str, default=None, help="dataset root path")
@@ -964,6 +984,7 @@ if __name__ == "__main__":
     input_height = None
     input_width = None
     upsample_output = False
+    resize_mode = "stretch"
     if args.dataset in ["apollo", "camvid"]:
         input_height = 512
         input_width = 640
@@ -972,6 +993,11 @@ if __name__ == "__main__":
         input_height = 256
         input_width = 512
         upsample_output = True
+    elif args.dataset == "kitti360":
+        input_height = 256
+        input_width = 896
+        upsample_output = True
+        resize_mode = "aspect_crop"
 
     if args.output_root:
         feature_folder = args.output_root
@@ -985,6 +1011,8 @@ if __name__ == "__main__":
         if not args.corruption:
             raise ValueError("corruption is required for cityscapes_corruptions")
         feature_folder = os.path.join("/data1/wangcl/project/VidSeg/cityscapes_corruptions", args.corruption)
+    elif args.dataset == "kitti360":
+        feature_folder = "/data1/wangcl/project/VidSeg/kitti360"
     else:
         feature_folder = args.feature_folder
 
@@ -1005,6 +1033,7 @@ if __name__ == "__main__":
             input_height,
             input_width,
             upsample_output,
+            resize_mode,
             run_id=run_id,
             write_summary=True,
         )
@@ -1026,6 +1055,7 @@ if __name__ == "__main__":
                     input_height,
                     input_width,
                     upsample_output,
+                    resize_mode,
                 ),
                 kwargs={"run_id": run_id, "write_summary": False},
             )
@@ -1035,7 +1065,7 @@ if __name__ == "__main__":
             process.join()
 
         part_paths = glob(os.path.join(feature_folder, f"metrics_part_{run_id}_*.npz"))
-        num_classes = 15 if args.dataset in ["apollo", "camvid", "cityscapes_origin", "cityscapes_corruptions"] else 124
+        num_classes = 15 if args.dataset in ["apollo", "camvid", "cityscapes_origin", "cityscapes_corruptions", "kitti360"] else 124
         merged = OVDGMetrics.merge_parts(
             part_paths,
             num_classes=num_classes,

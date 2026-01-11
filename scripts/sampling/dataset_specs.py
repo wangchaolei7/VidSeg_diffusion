@@ -63,6 +63,12 @@ def build_dataset_spec(args) -> DatasetSpec:
         mask_root = args.mask_root or os.path.join(dataset_root, "gtFine")
         mask_suffix = args.mask_suffix if args.mask_suffix != "" else "_gtFine_label14TrainIds"
         split_file = None
+    elif dataset == "kitti360":
+        dataset_root = args.dataset_root or "/home/wangcl/data/open_video_DGSS/kitti360_sequence"
+        color_root = args.color_root or os.path.join(dataset_root, "train", "data_2d_raw")
+        mask_root = args.mask_root or os.path.join(dataset_root, "train", "data_2d_semantics")
+        mask_suffix = args.mask_suffix
+        split_file = None
     else:
         color_root = args.color_root or args.dataset_path
         mask_root = args.mask_root or args.dataset_path
@@ -108,6 +114,24 @@ def list_sequences(spec: DatasetSpec) -> List[Tuple[str, str, str]]:
             )
             for exp_name in exp_names
         ]
+
+    if spec.name == "kitti360":
+        sequences = []
+        if not os.path.isdir(spec.color_root) or not os.path.isdir(spec.mask_root):
+            return sequences
+        for drive in sorted(os.listdir(spec.color_root)):
+            drive_path = os.path.join(spec.color_root, drive)
+            if not os.path.isdir(drive_path):
+                continue
+            color_dir = os.path.join(drive_path, "image_00", "data_rect")
+            mask_dir = os.path.join(spec.mask_root, drive, "image_00", "15semantic")
+            if not os.path.isdir(color_dir) or not os.path.isdir(mask_dir):
+                continue
+            if not any(name.endswith(spec.mask_ext) for name in os.listdir(mask_dir)):
+                continue
+            exp_name = os.path.join(drive, "image_00")
+            sequences.append((exp_name, color_dir, mask_dir))
+        return sequences
 
     if spec.split_file and os.path.isfile(spec.split_file):
         exp_names = _read_split_file(spec.split_file)

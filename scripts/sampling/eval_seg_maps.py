@@ -139,7 +139,7 @@ def main() -> None:
         "--dataset",
         type=str,
         default="apollo",
-        choices=["vspw", "apollo", "camvid", "cityscapes_origin", "cityscapes_corruptions"],
+        choices=["vspw", "apollo", "camvid", "cityscapes_origin", "cityscapes_corruptions", "kitti360"],
     )
     parser.add_argument("--dataset_root", type=str, default=None)
     parser.add_argument("--color_root", type=str, default=None)
@@ -182,7 +182,7 @@ def main() -> None:
 
     num_classes = args.num_classes
     if num_classes is None:
-        num_classes = 15 if args.dataset in ["apollo", "camvid", "cityscapes_origin", "cityscapes_corruptions"] else 124
+        num_classes = 15 if args.dataset in ["apollo", "camvid", "cityscapes_origin", "cityscapes_corruptions", "kitti360"] else 124
 
     for corruption in corruption_list:
         if args.dataset == "cityscapes_corruptions":
@@ -201,6 +201,8 @@ def main() -> None:
                     "/data1/wangcl/project/VidSeg/cityscapes_corruptions",
                     args.corruption,
                 )
+            elif args.dataset == "kitti360":
+                output_root = "/data1/wangcl/project/VidSeg/kitti360"
             else:
                 output_root = "/data1/wangcl/project/VidSeg"
 
@@ -217,10 +219,13 @@ def main() -> None:
             citys_sim_thresh=args.citys_sim_thresh,
         )
 
-        use_citys_sparse = args.cityscapes_sparse_mvc or args.dataset in [
+        use_citys_sparse = args.dataset in [
             "cityscapes_origin",
             "cityscapes_corruptions",
-        ]
+        ] or (args.cityscapes_sparse_mvc and args.dataset in [
+            "cityscapes_origin",
+            "cityscapes_corruptions",
+        ])
 
         seq_iter = tqdm(sequences, desc="sequences", unit="seq")
         for exp_name, color_dir, mask_dir in seq_iter:
